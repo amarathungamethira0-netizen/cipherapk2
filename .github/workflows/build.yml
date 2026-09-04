@@ -1,0 +1,111 @@
+name: Build and Release Android APK
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build CipherLab APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Checkout
+      # ------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # ------------------------------------------------------------
+      # 2. Toolchains (latest, non-deprecated action versions)
+      #    NOTE: no "cache: gradle" here — the android/ directory
+      #    does not exist yet at checkout time, which caused:
+      #    "No file matched to [**/*.gradle*, **/gradle-wrapper.properties]"
+      # ------------------------------------------------------------
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ------------------------------------------------------------
+      # 3. Web build FIRST (Capacitor needs dist/ before sync)
+      # ------------------------------------------------------------
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build offline web application
+        run: npm run build
+
+      # ------------------------------------------------------------
+      # 4. Generate the native Android project on CI
+      #    (android/ is NOT committed to the repository)
+      # ------------------------------------------------------------
+      - name: Add Android platform (skip if already present)
+        run: npx cap add android || true
+
+      - name: Sync web assets into Android project
+        run: npx cap sync android
+
+      - name: Verify Gradle files exist
+        run: |
+          test -f android/gradlew || { echo "::error::android/gradlew not found — cap add android failed"; exit 1; }
+          ls android/*.gradle* android/gradle/wrapper/gradle-wrapper.properties
+
+      # ------------------------------------------------------------
+      # 5. Gradle cache (safe now — android/ exists at this point)
+      # ------------------------------------------------------------
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ------------------------------------------------------------
+      # 6. Build the installable APK
+      # ------------------------------------------------------------
+      - name: Build APK with Gradle
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      # ------------------------------------------------------------
+      # 7. Collect + publish
+      # ------------------------------------------------------------
+      - name: Name APK for release
+        run: |
+          mkdir -p release
+          cp android/app/build/outputs/apk/debug/app-debug.apk "release/CipherLab-${GITHUB_REF_NAME}.apk"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CipherLab-${{ github.ref_name }}-APK
+          path: release/*.apk
+          if-no-files-found: error
+
+      - name: Upload APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.apk
+          generate_release_notes: true
+          fail_on_unmatched_files: true
